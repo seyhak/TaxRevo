@@ -1,8 +1,11 @@
 from collections import OrderedDict
 from datetime import date, timedelta
+import decimal
 import logging
 import requests
 
+
+report_operations = {}
 # {isodate: value}
 prices_of_usd_in_pln_in_date = OrderedDict([
     ("2020-01-06", 3.8213),
@@ -62,6 +65,11 @@ prices_of_usd_in_pln_in_date = OrderedDict([
 ])
 
 
+def decimal_prices():
+    for k, v in prices_of_usd_in_pln_in_date.items():
+        prices_of_usd_in_pln_in_date[k] = decimal.Decimal(str(v))
+
+
 def get_usd_price_from_nbp_api(requested_date):
     """
     {
@@ -109,6 +117,9 @@ class Transaction(object):
         'DIV',
         'DIVNRA',
     ]
+    STOCK_SPLIT_DATES = {
+        'TSLA': {'date': '2020-08-31', 'multiplier': 5}
+    }
 
     @staticmethod
     def get_formated_input_value(value):
@@ -125,20 +136,25 @@ class Transaction(object):
             error = 'Wrong transaction type {}'.format(transaction_type)
             raise TypeError(error)
         self.date = date.fromisoformat(transaction_date)
+        multiplier = 1
+        if self.entity_code in self.STOCK_SPLIT_DATES:
+            split_info = self.STOCK_SPLIT_DATES.get(self.entity_code)
+            if date.fromisoformat(self.date) <= date.fromisoformat(split_info.get('date')):
+                multiplier = split_info.get('multiplier')
         try:
             value = self.get_formated_input_value(value)
             quantity_of_stocks = self.get_formated_input_value(quantity_of_stocks)
-            self.value_usd = float(value)
-            self.quantity_of_stocks = float(quantity_of_stocks)
-        except ValueError as error:
+            self.value_usd = decimal.Decimal(value)
+            self.quantity_of_stocks = decimal.Decimal(quantity_of_stocks) * multiplier
+        except (ValueError, decimal.InvalidOperation()) as error:
             raise error
-
+        self.single_stock_price = abs(self.value_usd / self.quantity_of_stocks) if self.quantity_of_stocks != 0 else 0
         self.value_pln = 0
         self.usd_price_in_given_date = 0
 
-    def get_value_for_given_amount_of_stocks(self, amount_of_stocks):
+    def get_value_pln_for_given_amount_of_stocks(self, amount_of_stocks):
         percent = amount_of_stocks / self.quantity_of_stocks
-        return abs(percent * self.usd_price_in_given_date * self.value_usd)
+        return abs(decimal.Decimal(str(percent * self.usd_price_in_given_date * self.value_usd)))
 
     def count_pln_value(self):
         # http://api.nbp.pl/api/exchangerates/tables/{table}/{date}/
@@ -150,7 +166,8 @@ class Transaction(object):
         return f'<[{self.transaction_type}][{self.entity_code}][Q: {self.quantity_of_stocks}][{self.date.isoformat()}] PLN {self.value_pln} = {self.usd_price_in_given_date} * USD {self.value_usd}>'
 
     def __repr__(self):
-        return f'<[{self.transaction_type}][{self.entity_code}][Q: {self.quantity_of_stocks}][{self.date.isoformat()}] PLN {self.value_pln} = {self.usd_price_in_given_date} * USD {self.value_usd}>'
+        price_per_stock = round(self.value_usd / self.quantity_of_stocks, 4) if self.quantity_of_stocks != 0 else 'NoPrice'
+        return f'<[{self.transaction_type}][{self.entity_code}][Q: {self.quantity_of_stocks}][{self.date.isoformat()}] PLN {self.value_pln} = {self.usd_price_in_given_date} * USD {self.value_usd} (stock_price: {price_per_stock})>'
 
 
 def get_data_from_file(filename):
@@ -227,7 +244,7 @@ def get_transactions(filenames):
                     parsed_data.get('quantity_of_stocks'),
                 )
                 transactions.append(transaction)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, decimal.InvalidOperation):
                 error = f'skipped {dat}'
                 logging.error(error)
     return transactions
@@ -247,49 +264,113 @@ def get_processed_single_group(key, transactions):
     # pln
     return_value = {
         'key': key,
-        'income': 0.0,
-        'cost': 0.0,
-        'stocks_left': 0,
-        'profit': 0,
+        'income': decimal.Decimal(0.0),
+        'cost': decimal.Decimal(0.0),
+        'stocks_left': decimal.Decimal(0.0),
+        'profit': decimal.Decimal(0.0),
     }
+    report_operations[return_value.get('key')] = []
     group_managed = [
         {'transaction': val, 'quantity': val.quantity_of_stocks} for val in transactions
     ]
-    # if 'SPWR' not in key:
+    # if 'HGV' not in key:
     #     return
     for g in group_managed:
         print(g)
-    for entity in group_managed:
-        transaction = entity.get('transaction')
+    print('===============')
+    for index, entityA in enumerate(group_managed):
+        transaction = entityA.get('transaction')
         if transaction.transaction_type == 'SELL':
-            amount_to_subtract = transaction.quantity_of_stocks * -1  # it is x < 0
-            for transaction_managed_to_subtract in group_managed:
-                transaction_to_subtract_from = transaction_managed_to_subtract.get('transaction')
+            profits_for_report = []
+            pre_income = return_value.get('income')
+            pre_cost = return_value.get('cost')
+            report_operations[return_value.get('key')].append(str(entityA))
 
-                if transaction_to_subtract_from.transaction_type == 'BUY' and transaction_managed_to_subtract.get('quantity') != 0:
-                    diff = transaction_managed_to_subtract.get('quantity') - amount_to_subtract
+            amount_to_subtract = transaction.quantity_of_stocks * -1  # it is x < 0
+            for index_b, entityB in enumerate(group_managed):
+                transactionB = entityB.get('transaction')
+
+                if transactionB.transaction_type == 'BUY' and entityB.get('quantity') != 0:
+                    report_operations[return_value.get('key')].append(str(entityB))
+                    diff = entityB.get('quantity') - abs(amount_to_subtract)
                     # import pdb; pdb.set_trace()
-                    if diff <= 0:
-                        transaction_managed_to_subtract['quantity'] = 0
-                        cost_updated = return_value.get('cost') + transaction_to_subtract_from.value_pln
-                        return_value['cost'] = cost_updated
-                        updated_income = return_value.get('income') + transaction.get_value_for_given_amount_of_stocks(amount_to_subtract)
-                        return_value['income'] = updated_income
-                        amount_to_subtract = amount_to_subtract + diff
-                        entity['quantity'] = 0 if diff == 0 else amount_to_subtract
+                    if diff < 0:
+                        # sell more stocks than in this transaction buy
+                        updated_entity_A_quantity = diff
+                        updated_entity_B_quantity = 0
+
+                        stocks_amount_in_B_transaction = entityB.get('quantity')
+                        cost_of_this_transaction = transactionB.get_value_pln_for_given_amount_of_stocks(stocks_amount_in_B_transaction)
+                        cost_of_this_transaction_report = f'cost: {transactionB.usd_price_in_given_date} * {abs(stocks_amount_in_B_transaction)} * {transactionB.single_stock_price} = {cost_of_this_transaction}'
+
+                        income_of_this_transaction = transaction.get_value_pln_for_given_amount_of_stocks(stocks_amount_in_B_transaction)
+                        income_of_this_transaction_report = f'income: {transaction.usd_price_in_given_date} * {abs(stocks_amount_in_B_transaction)} * {transaction.single_stock_price} = {income_of_this_transaction}'
+
+                        amount_to_subtract = diff
+                    elif diff == 0:
+                        updated_entity_A_quantity = 0
+                        updated_entity_B_quantity = 0
+
+                        cost_of_this_transaction = transactionB.get_value_pln_for_given_amount_of_stocks(amount_to_subtract)
+                        cost_of_this_transaction_report = f'cost: {transactionB.usd_price_in_given_date} * {abs(amount_to_subtract)} * {transactionB.single_stock_price} = {cost_of_this_transaction}'
+
+                        income_of_this_transaction = transaction.get_value_pln_for_given_amount_of_stocks(amount_to_subtract)
+                        income_of_this_transaction_report = f'income: {transaction.usd_price_in_given_date} * {abs(amount_to_subtract)} * {transaction.single_stock_price} = {income_of_this_transaction}'
                     else:
-                        transaction_managed_to_subtract['quantity'] = diff
-                        cost_updated = return_value.get('cost') + transaction_to_subtract_from.get_value_for_given_amount_of_stocks(amount_to_subtract)
-                        return_value['cost'] = cost_updated
-                        updated_income = return_value.get('income') + transaction.get_value_for_given_amount_of_stocks(amount_to_subtract)
-                        return_value['income'] = updated_income
-                    if diff == 0:
+                        updated_entity_A_quantity = 0
+                        updated_entity_B_quantity = diff
+
+                        cost_of_this_transaction = transactionB.get_value_pln_for_given_amount_of_stocks(amount_to_subtract)
+                        cost_of_this_transaction_report = f'cost: {transactionB.usd_price_in_given_date} * {abs(amount_to_subtract)} * {transactionB.single_stock_price} = {cost_of_this_transaction}'
+
+                        income_of_this_transaction = transaction.get_value_pln_for_given_amount_of_stocks(amount_to_subtract)
+                        income_of_this_transaction_report = f'income: {transaction.usd_price_in_given_date} * {abs(amount_to_subtract)} * {transaction.single_stock_price} = {income_of_this_transaction}'
+
+                    print(f'{index}.{index_b}')
+                    print(entityA)
+                    print(entityB)
+
+                    updated_income = return_value.get('income') + income_of_this_transaction
+                    cost_updated = return_value.get('cost') + cost_of_this_transaction
+
+                    income = return_value.get('income')
+                    cost = return_value.get('cost')
+                    log = f'income_of_this_transaction: {income_of_this_transaction}: {income} -> {updated_income}'
+                    print(log)
+                    log = f'cost_of_this_transaction: {cost_of_this_transaction}: {cost} -> {cost_updated}\nprofit {income - cost} -> {updated_income - cost_updated}'
+                    print(log)
+
+                    profit_report = f'profit: {income_of_this_transaction} - {cost_of_this_transaction} = {income_of_this_transaction - cost_of_this_transaction}'
+                    entityA['quantity'] = updated_entity_A_quantity
+                    entityB['quantity'] = updated_entity_B_quantity
+                    print(entityA)
+                    print(entityB)
+                    return_value['income'] = updated_income
+                    return_value['cost'] = cost_updated
+                    # report
+                    report_operations[return_value.get('key')].append(income_of_this_transaction_report)
+                    report_operations[return_value.get('key')].append(cost_of_this_transaction_report)
+                    report_operations[return_value.get('key')].append(profit_report)
+                    profits_for_report.append(str(income_of_this_transaction - cost_of_this_transaction))
+
+                    if diff >= 0:
+                        transaction_profit = (updated_income - pre_income) - (cost_updated - pre_cost)
+                        transaction_profit_report = 'profit for sell: ' + ' + '.join(profits_for_report) + f' = {transaction_profit}'
+                        report_operations[return_value.get('key')].append(transaction_profit_report)
+                        print(f'transaction {index} profit: {transaction_profit}')
                         break
     # count stocks left
     stocks_left = sum([group.get('quantity') for group in group_managed])
     return_value['stocks_left'] = stocks_left
     # count profit
     return_value['profit'] = return_value['income'] - return_value['cost']
+    key = return_value.get('key')
+    profit = return_value.get('profit')
+    income = return_value.get('income')
+    cost = return_value.get('cost')
+    report_operations[return_value.get('key')].append(
+        f'[{key}] profit: {profit}, income: {income}, cost: {cost}'
+    )
     print(return_value)
     return return_value
 
@@ -298,7 +379,7 @@ def get_processed_transactions_result(grouped_transactions):
     processed_groups = []
     for key, group in grouped_transactions.items():
         logging.info(f'processing {key}')
-        print(f'\nprocessing {key}')
+        print(f'\n\nprocessing {key}')
         processed_group = get_processed_single_group(key, group)
         processed_groups.append(processed_group)
     return processed_groups
@@ -321,12 +402,59 @@ def count_pln_values(transactions):
         transaction.count_pln_value()
 
 
+def show_results(result):
+    print('-------------------------')
+    print(result)
+
+    print('------------PROFIT-------------')
+    profit = sum([res.get('profit') for res in result if res])
+    print(profit)
+    profit = round(profit, 4)
+    cost = sum([res.get('cost') for res in result if res])
+    print(cost)
+    cost = round(cost, 4)
+    income = sum([res.get('income') for res in result if res])
+    print(income)
+    income = round(income, 4)
+    print(f'profit  {profit}')
+    print(f'cost    {cost}')
+    print(f'income  {income}')
+    report_operations['total'] = []
+    report_operations['total'].append('---------------TOTAL---------------')
+    report_operations['total'].append(f'profit  {profit}')
+    report_operations['total'].append(f'cost    {cost}')
+    report_operations['total'].append(f'income  {income}')
+
+
+def print_operations():
+    with open('output.csv', 'w+') as file:
+        for k, v in report_operations.items():
+            if k == 'total':
+                continue
+            file.write('\n')
+            file.write(k)
+            file.write('\n')
+            print('')
+            print(k)
+            for v1 in v:
+                file.write(v1)
+                file.write('\n')
+                print(v1)
+        totals = report_operations.get('total')
+        for total in totals:
+            print(total)
+            file.write(total)
+            file.write('\n')
+
+
 def run():
     """
     1. read csv
     2. count tax earn/loss
     3. return csv
     """
+    print(decimal.getcontext())
+    decimal_prices()
     # filename = '01.2020.csv'
     filenames = []
     for i in range(1, 13):
@@ -342,16 +470,8 @@ def run():
     grouped_transactions = get_grouped_transactions(transactions)
     # print(grouped_transactions)
     result = get_processed_transactions_result(grouped_transactions)
-    print('-------------------------')
-    print(result)
-
-    print('------------PROFIT-------------')
-    profit = sum([res.get('profit') for res in result])
-    cost = sum([res.get('cost') for res in result])
-    income = sum([res.get('income') for res in result])
-    print(f'profit  {profit}')
-    print(f'cost    {cost}')
-    print(f'income  {income}')
+    show_results(result)
+    print_operations()
 
 
 run()
