@@ -4,9 +4,11 @@ import decimal
 import logging
 import requests
 
+DEBUG = False
 
 report_operations = {}
 # {isodate: value}
+# dates here are date of sell (price of currency is the closest date before the sell date)
 prices_of_usd_in_pln_in_date = OrderedDict([
     ("2020-01-06", 3.8213),
     ("2020-01-10", 3.8251),
@@ -66,7 +68,9 @@ prices_of_usd_in_pln_in_date = OrderedDict([
 
 
 def decimal_prices():
+    print('currency prices:')
     for k, v in prices_of_usd_in_pln_in_date.items():
+        print(f'{k} : {v}')
         prices_of_usd_in_pln_in_date[k] = decimal.Decimal(str(v))
 
 
@@ -87,6 +91,7 @@ def get_usd_price_from_nbp_api(requested_date):
     """
     NBP_TABLE_API_URL = 'http://api.nbp.pl/api/exchangerates/rates/A/usd/'
     url = NBP_TABLE_API_URL + f'{requested_date}/'
+    print(f'getting usd price in pln on {requested_date} : {url}')
     resp = requests.get(url)
     return_date = None
     if resp.status_code != 200:
@@ -94,7 +99,9 @@ def get_usd_price_from_nbp_api(requested_date):
         next_date = date.fromisoformat(requested_date) - timedelta(days=1)
         return_date = get_usd_price_from_nbp_api(next_date.isoformat())
     else:
-        return_date = resp.json()['rates'][0]['mid']
+        value = resp.json()['rates'][0]['mid']
+        print(f'{requested_date} : {value}')
+        return_date = value
     return return_date
 
 
@@ -262,7 +269,9 @@ def get_grouped_transactions(transactions):
 
 def get_processed_single_group(key, transactions):
     # pln
-    KEYS_TO_SKIP = ['BYND', 'BA', 'INTC', 'NIO', ]
+    KEYS_TO_SKIP = ['BYND', 'BA', 'INTC', 'NIO', 'SPWR', 'KOS', 'HGV', 'MUR', 'DIS', 'AMD', 'FB']
+    if not DEBUG:
+        KEYS_TO_SKIP = []
     print_logs = []
     print_logs.append(f'\n\n!!!!!!!!!!!!!!!!!!!!!!! processing {key} !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
     PRINT_LOGS = True
@@ -272,7 +281,7 @@ def get_processed_single_group(key, transactions):
         'cost': decimal.Decimal(0.0),
         'stocks_left': decimal.Decimal(0.0),
         'profit': decimal.Decimal(0.0),
-        'profit_div': decimal.Decimal(0.0),
+        'income_div': decimal.Decimal(0.0),
         'cost_div': decimal.Decimal(0.0),
         'profit_total': decimal.Decimal(0.0),
     }
@@ -280,10 +289,10 @@ def get_processed_single_group(key, transactions):
     group_managed = [
         {'transaction': val, 'quantity': val.quantity_of_stocks} for val in transactions
     ]
-    # if 'HGV' not in key:
-    #     return
+    if 'HGV' not in key and DEBUG:
+        return
     for g in group_managed:
-        print_logs.append(g)
+        print_logs.append(str(g))
     print_logs.append('===============')
     for index, entityA in enumerate(group_managed):
         transaction = entityA.get('transaction')
@@ -291,20 +300,20 @@ def get_processed_single_group(key, transactions):
         if transaction.transaction_type == 'DIV':
             report_operations[return_value.get('key')].append(str(entityA))
             report_operations[return_value.get('key')].append(
-                f'DIV tax {transaction.value_pln}'
+                f'DIV {transaction.value_pln}'
             )
-            updated_div = return_value.get('profit_div') + transaction.value_pln
-            profit_div_before = return_value.get('profit_div')
+            updated_div = return_value.get('income_div') + transaction.value_pln
+            income_div_before = return_value.get('income_div')
 
             print_logs.append(str(entityA))
-            print_logs.append(f'* DIV: {profit_div_before} + {transaction.value_pln} -> {updated_div}')
+            print_logs.append(f'* DIV: {income_div_before} + {transaction.value_pln} -> {updated_div}')
 
-            return_value['profit_div'] = updated_div
+            return_value['income_div'] = updated_div
         # DIVNRA
         if transaction.transaction_type == 'DIVNRA':
             report_operations[return_value.get('key')].append(str(entityA))
             report_operations[return_value.get('key')].append(
-                f'* DIVNRA tax {transaction.value_pln}'
+                f'* DIVNRA {transaction.value_pln}'
             )
             updated_cost_div = return_value.get('cost_div') + transaction.value_pln
             cost_div_before = return_value.get('cost_div')
@@ -315,19 +324,34 @@ def get_processed_single_group(key, transactions):
             return_value['cost_div'] = updated_cost_div
         # SELL
         if transaction.transaction_type == 'SELL':
+            if DEBUG:
+                print_logs.append(f'SELL{index}{entityA}')
             profits_for_report = []
             pre_income = return_value.get('income')
             pre_cost = return_value.get('cost')
             report_operations[return_value.get('key')].append('')
             report_operations[return_value.get('key')].append(str(entityA))
 
-            amount_to_subtract = transaction.quantity_of_stocks * -1  # it is x < 0
+            amount_to_subtract = abs(transaction.quantity_of_stocks)  # it is x < 0
             for index_b, entityB in enumerate(group_managed):
                 transactionB = entityB.get('transaction')
+
+                if transactionB.transaction_type == 'BUY' and DEBUG:
+                    print_logs.append(f'{index}.{index_b} {entityB}')
 
                 if transactionB.transaction_type == 'BUY' and entityB.get('quantity') != 0:
                     report_operations[return_value.get('key')].append(str(entityB))
                     diff = entityB.get('quantity') - abs(amount_to_subtract)
+                    q = entityB.get('quantity')
+                    if DEBUG:
+                        print_logs.append(f'{diff} = {q} - {abs(amount_to_subtract)}')
+
+                    print_logs.append(f'{index}.{index_b}')
+                    print_logs.append(str(entityA))
+                    print_logs.append(str(entityB))
+
+                    if diff < 0 and DEBUG:
+                        print_logs.append(f'{index_b}{entityB}')
                     # import pdb; pdb.set_trace()
                     if diff < 0:
                         # sell more stocks than in this transaction buy
@@ -361,10 +385,6 @@ def get_processed_single_group(key, transactions):
                         income_of_this_transaction = transaction.get_value_pln_for_given_amount_of_stocks(amount_to_subtract)
                         income_of_this_transaction_report = f'income: {transaction.usd_price_in_given_date} * {abs(amount_to_subtract)} * {transaction.single_stock_price} = {round(income_of_this_transaction, 4)}'
 
-                    print_logs.append(f'{index}.{index_b}')
-                    print_logs.append(str(entityA))
-                    print_logs.append(str(entityB))
-
                     updated_income = return_value.get('income') + income_of_this_transaction
                     cost_updated = return_value.get('cost') + cost_of_this_transaction
 
@@ -374,7 +394,7 @@ def get_processed_single_group(key, transactions):
                     print_logs.append((
                         f'* income_of_this_transaction: {income_of_this_transaction}: {income} -> {updated_income}'
                         f'\n* cost_of_this_transaction: {cost_of_this_transaction}: {cost} -> {cost_updated}'
-                        f'\n* profit {income - cost} -> {updated_income - cost_updated}'
+                        f'\n* profit (general + this) {income - cost} +  {income_of_this_transaction - cost_of_this_transaction} -> {updated_income - cost_updated}'
                     ))
 
                     profit_report = f'profit: {income_of_this_transaction} - {cost_of_this_transaction} = {round(income_of_this_transaction - cost_of_this_transaction, 4)}'
@@ -397,13 +417,15 @@ def get_processed_single_group(key, transactions):
                         transaction_profit_report = 'profit for sell: ' + ' + '.join(profits_for_report) + f' = {transaction_profit}'
                         report_operations[return_value.get('key')].append(transaction_profit_report)
 
-                        print_logs.append(f'transaction {index} profit: {transaction_profit}')
+                        print_logs.append(f'whole sell transaction {index} profit: {transaction_profit}')
                         break
     # count stocks left
     stocks_left = sum([group.get('quantity') for group in group_managed])
     return_value['stocks_left'] = stocks_left
     # count profit
     return_value['profit'] = return_value['income'] - return_value['cost']
+    return_value['income_total'] = return_value['income_div'] + return_value['income']
+    return_value['profit_div'] = return_value['income_div'] - return_value['cost_div']
     return_value['profit_total'] = return_value['profit'] + return_value['profit_div']
     return_value['cost_total'] = return_value['cost'] + return_value.get('cost_div')
 
@@ -411,17 +433,25 @@ def get_processed_single_group(key, transactions):
     profit = return_value.get('profit')
     income = return_value.get('income')
     cost = return_value.get('cost')
-    profit_div = return_value.get('profit_div')
+    income_div = return_value['income_div']
+    profit_div = return_value['profit_div']
     cost_div = return_value.get('cost_div')
     cost_total = return_value.get('cost_total')
     profit_total = return_value.get('profit_total')
+    income_total = return_value['income_total']
     report_operations[return_value.get('key')].append(
-        f'[{key}] profit_stocks: {profit}, income: {income}, cost: {cost}, div: {profit_div}, cost_div: {cost_div}, cost_total: {cost_total}, profit_total: {profit_total}'
+        f'[{key}] profit_stocks: {profit}, income_stocks: {income}, cost_stocks: {cost}, income_div: {income_div}, cost_div: {cost_div}, profit_div: {profit_div}, cost_total: {cost_total}, income_total: {income_total}, profit_stocks: {profit_total}'
     )
 
-    print_logs.append('       --return_value--')
+    print_logs.append('\n       --return_value--\n')
     print_logs.append(str(return_value))
-    print_logs.append('       --return_value--')
+    if stocks_left < 0 and DEBUG:
+        print_logs.append('\n! WARNING ! WARNING ! WARNING ! WARNING ! WARNING ! WARNING ! WARNING ! => STOCKS TOO FEW\n')
+
+    if stocks_left > 0 and DEBUG:
+        print_logs.append('\n! WARNING ! WARNING ! WARNING ! WARNING ! WARNING ! WARNING ! WARNING ! => STOCKS LEFT\n')
+
+    print_logs.append('       --return_value END--')
 
     if PRINT_LOGS and key not in KEYS_TO_SKIP:
         for log in print_logs:
@@ -457,69 +487,90 @@ def count_pln_values(transactions):
 def get_other_costs():
     """Costs like, broker costs"""
     other_costs = decimal.Decimal(0)
-    other_costs_dict = OrderedDict()
+    other_costs_list = []
     # fill in Ordered Dict
-    with open('other.csv') as file:
-        other_costs_list = file.readlines()
-        for other_cost in other_costs_list:
+    with open('other_costs.csv') as file:
+        other_costs_readed = file.readlines()
+        for other_cost in other_costs_readed:
             splited = other_cost.split(' ')
-            other_costs_dict[splited[0]] = splited[1]
+            cost = {
+                'date': splited[0],
+                'name': splited[2],
+                'value_usd': decimal.Decimal(splited[1]),
+            }
+            other_costs_list.append(cost)
     # count other costs
-    for cost_date, value_usd in other_costs_dict.items():
-        usd_price = prices_of_usd_in_pln_in_date.get(cost_date)
+    print('\n-------------------- OTHER COSTS --------------------')
+    for cost in other_costs_list:
+        # get or fetch usd price
+        usd_price = prices_of_usd_in_pln_in_date.get(cost['date'])
         if not usd_price:
-            usd_price = get_usd_price_from_nbp_api(cost_date)
-        cost_count = usd_price * value_usd
+            usd_price = get_usd_price_from_nbp_api(cost['date'])
+            usd_price = decimal.Decimal(usd_price)
+        print(f'{cost["date"]} : {usd_price}')
+        cost_count = usd_price * cost['value_usd']
+        print(f'{cost_count} = {usd_price} * {cost["value_usd"]}')
         other_costs += cost_count
-    return 0
+        print(f'{cost_count} => {other_costs}')
+    print('\n-------------------- OTHER COSTS END--------------------')
+    return other_costs
 
 
-def show_results(result):
+def show_results(result, other_costs):
     TAX = decimal.Decimal('0.19')
     # print('-------------------------')
     # print(result)
 
     print('\n------------PROFIT-------------')
-    profit = sum([res.get('profit') for res in result if res])
-    profit = round(profit, 4)
-    cost = sum([res.get('cost') for res in result if res])
-    cost = round(cost, 4)
-    income = sum([res.get('income') for res in result if res])
-    income = round(income, 4)
+    profit_stocks = sum([res.get('profit') for res in result if res])
+    profit_stocks = round(profit_stocks, 4)
+    cost_stocks = sum([res.get('cost') for res in result if res])
+    cost_stocks = round(cost_stocks, 4)
+    income_stocks = sum([res.get('income') for res in result if res])
+    income_stocks = round(income_stocks, 4)
 
-    other_costs = get_other_costs()
     profit_div = sum([res.get('profit_div') for res in result if res])
+    income_div = sum([res.get('income_div') for res in result if res])
     cost_div = sum([res.get('cost_div') for res in result if res])
-    profit_total = profit + profit_div
-    cost_total = cost + cost_div + other_costs
-    tax_div_to_pay = (TAX * profit_div) - cost_div
-    tax_stocks_to_pay = (TAX * profit)
-    tax_total_to_pay = tax_div_to_pay + tax_stocks_to_pay - other_costs
+    profit_total = profit_stocks + profit_div - other_costs
+    cost_total = cost_stocks + cost_div + other_costs
 
-    income = round(income, 4)
-    income_total = profit_div + income
-    profit_msg = f'profit  {profit}'
-    cost_msg = f'cost    {cost}'
-    income_msg = f'income  {income}'
+    income_stocks = round(income_stocks, 4)
+    income_total = income_div + income_stocks
+
+    tax_div_to_pay = TAX * (income_div - cost_div)
+    tax_stocks_to_pay = TAX * profit_stocks
+    tax_total_to_pay = TAX * (income_total - cost_total)
+    tax_other_costs = TAX * other_costs
+
+    profit_msg = f'profit_stocks  {profit_stocks}'
+    cost_msg = f'cost_stocks    {cost_stocks}'
+    income_msg = f'income_stocks  {income_stocks}'
     profit_div_msg = f'profit_div  {profit_div}'
+    income_div_msg = f'income_div  {income_div}'
     cost_div_msg = f'cost_div  {cost_div}'
     profit_total_msg = f'profit_total  {profit_total}'
     income_total_msg = f'income_total  {income_total}'
     cost_total_msg = f'cost_total  {cost_total}'
     cost_total_msg = f'cost_total  {cost_total}'
-    tax_div_to_pay_msg = f'tax_div_to_pay (0.19 * {profit_div}) - {cost_div} = {tax_div_to_pay}'
-    tax_stocks_to_pay_msg = f'tax_stocks_to_pay (0.19 * {profit}) = {tax_stocks_to_pay}'
-    tax_total_to_pay_msg = f'tax_total_to_pay_msg {tax_div_to_pay} + {tax_stocks_to_pay} = {tax_total_to_pay}'
+    other_cost_msg = f'other costs (trader provisions)    {other_costs}'
+    tax_other_cost_msg = f'other cost tax (to subtract from other taxes)   {TAX} * {other_costs} = {tax_other_costs}'
+    tax_div_to_pay_msg = f'tax_div_to_pay    {TAX} * ({income_div} - {cost_div}) = {tax_div_to_pay}'
+    tax_stocks_to_pay_msg = f'tax_stocks_to_pay  {TAX} * {profit_stocks} = {tax_stocks_to_pay}'
+    tax_total_to_pay_msg = f'tax_total_to_pay_msg    {TAX} * {profit_total}(income_total - cost_total) = {tax_total_to_pay}'
 
     msgs = [
         profit_msg,
         cost_msg,
         income_msg,
         profit_div_msg,
+        income_div_msg,
         cost_div_msg,
         profit_total_msg,
         income_total_msg,
         cost_total_msg,
+        other_cost_msg,
+        tax_other_cost_msg,
         tax_div_to_pay_msg,
         tax_stocks_to_pay_msg,
         tax_total_to_pay_msg,
@@ -564,9 +615,8 @@ def run():
     3. return csv
     """
     print(decimal.getcontext())
-    decimal_prices()
     # filename = '01.2020.csv'
-    filenames = []
+    filenames = ['2019.csv']
     for i in range(1, 13):
         path = f'{i}.2020.csv'
         filenames.append(path)
@@ -575,12 +625,16 @@ def run():
     # get values of usd in pln in date
     dates = get_transactions_dates(transactions)
     fill_prices_of_usd_in_pln_in_date(dates)
+    print(decimal.getcontext())
+    decimal_prices()
     fill_transactions_with_prices(transactions)
+
     count_pln_values(transactions)
     grouped_transactions = get_grouped_transactions(transactions)
     # print(grouped_transactions)
     result = get_processed_transactions_result(grouped_transactions)
-    show_results(result)
+    other_costs = get_other_costs()
+    show_results(result, other_costs)
     print_operations()
 
 

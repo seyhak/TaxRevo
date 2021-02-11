@@ -1,3 +1,4 @@
 *.csv
 !input.csv
 .vscode/settings.json
+report/*
